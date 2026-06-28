@@ -1,0 +1,27 @@
+[Unit]
+Description=Blue Panda Email Service — send-only AI agent email API
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+User=hetzner
+Group=hetzner
+Type=simple
+WorkingDirectory=/home/hetzner/AI/blue-panda-email-service
+Environment=PYTHONUNBUFFERED=1
+Environment=GMAIL_SERVICE_HOST=0.0.0.0
+Environment=GMAIL_SERVICE_PORT=9770
+Environment=GMAIL_SERVICE_LOG_LEVEL=info
+Environment=GMAIL_CREDENTIALS_PATH=/home/hetzner/.gmail-service/credentials.json
+Environment=GMAIL_TOKEN_PATH=/home/hetzner/.gmail-service/token.json
+ExecStart=/home/hetzner/AI/blue-panda-email-service/.venv/bin/python3 -m gmail_service
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ReadWritePaths=/home/hetzner/.gmail-service
+
+[Install]
+WantedBy=multi-user.target
