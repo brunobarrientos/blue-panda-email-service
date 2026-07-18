@@ -52,6 +52,7 @@ def run_oauth_flow(settings: Settings, headless: bool = False) -> Credentials:
     )
 
     if headless or not sys.stdout.isatty():
+        flow.redirect_uri = "http://localhost"
         auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
         print(f"\nAUTH_URL={auth_url}\n")
         print("Open the URL above in your browser, authorize the app, then paste the authorization code here:")

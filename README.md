@@ -1,6 +1,6 @@
 # blue-panda-email-service
 
-> Last revised: 2026-06-28
+> Last revised: 2026-07-11
 
 Standalone FastAPI service that sends email on behalf of `focusedbluepanda@gmail.com`.
 
@@ -33,9 +33,14 @@ authenticated as `brunobarrientosf@gmail.com` or any other personal account.
 
 ## OAuth flow
 
-The OAuth app is in **Testing** mode, so `focusedbluepanda@gmail.com` must be
-added as a test user in **Google Auth Platform → Audience → Test users** before
-running the flow.
+The OAuth app is **In production** as of 2026-07-11. This is required because
+Google expires refresh tokens from external Testing apps after seven days. The
+app remains unverified and private-use under Google's 100-user cap; publishing
+the OAuth audience does not expose this service publicly. Authenticate only as
+`focusedbluepanda@gmail.com`.
+
+After moving Testing → Production, perform one fresh consent flow. A refresh
+token issued while the app was still Testing may retain the seven-day lifetime.
 
 ### Option A: manual
 
@@ -88,6 +93,12 @@ curl -fsS http://hetzner:9770/profile
 ```json
 {"email_address": "focusedbluepanda@gmail.com", ...}
 ```
+
+The Hermes `Critical access health watchdog` forces this token and the personal
+Workspace token through their refresh paths every 30 minutes. It is silent while
+healthy and alerts on a new failure, recovery, or 24-hour unresolved reminder.
+Revocation, password/security events, or a missing refresh token still require
+human OAuth consent; automation must not bypass that boundary.
 
 ## Send a test email
 
