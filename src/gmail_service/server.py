@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -98,6 +99,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     circuit = {"broken_until": 0.0, "last_error": None}
     health_cache = {"checked_at": 0.0, "result": None}
 
+    send_state: dict = {"consecutive": 0, "last_failure": None}
+
     def require_gmail_client() -> GmailClient:
         if time.monotonic() < circuit["broken_until"]:
             raise HTTPException(
@@ -113,6 +116,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if isinstance(exc, RefreshError) or "invalid_grant" in str(exc):
             circuit["broken_until"] = time.monotonic() + _REFRESH_FAILURE_COOLDOWN_SEC
             circuit["last_error"] = str(exc)
+
+    def record_send_failure(exc: Exception) -> None:
+        """A lost email used to leave no trace outside the journal."""
+        send_state["consecutive"] += 1
+        send_state["last_failure"] = {
+            "error": str(exc),
+            "at": datetime.now(timezone.utc).isoformat(),
+            "consecutive": send_state["consecutive"],
+        }
+
+    def record_send_success() -> None:
+        send_state["consecutive"] = 0
+        send_state["last_failure"] = None
 
     def probe_gmail_auth() -> dict:
         """Real auth check, not just local expiry — cached to avoid hammering Google."""
@@ -158,6 +174,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return {
             "status": "ok",
             "gmail_auth": health_cache["result"],
+            "last_send_failure": send_state["last_failure"],
             "service": "gmail-service",
             "version": "0.1.0",
         }
@@ -189,10 +206,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 bcc=req.bcc,
                 attachments=[att.model_dump() if hasattr(att, "model_dump") else att.dict() for att in req.attachments],
             )
+            record_send_success()
             return result
         except Exception as exc:
             logger.exception("send_email failed")
             record_gmail_error(exc)
+            record_send_failure(exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     # ── Inbox ───────────────────────────────────────────────────────────
