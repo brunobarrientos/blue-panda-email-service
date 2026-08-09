@@ -10,13 +10,43 @@ import email.mime.multipart
 import email.mime.text
 import logging
 import mimetypes
+import os
 from typing import Any
 
+import socket
+import time
+
+import httplib2
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from google.oauth2.credentials import Credentials
 
 logger = logging.getLogger(__name__)
+
+# A single transient DNS failure used to lose an email outright (2026-08-07/08).
+# These cluster at boot-time network churn on star, when Docker/k3s bring up
+# veth interfaces, tailscaled rebinds and systemd-resolved flushes its caches.
+SEND_MAX_ATTEMPTS = int(os.environ.get("GMAIL_SEND_MAX_ATTEMPTS", "4"))
+SEND_BACKOFF_BASE_SEC = float(os.environ.get("GMAIL_SEND_BACKOFF_BASE_SEC", "2"))
+# 429 and 5xx are the server telling us to come back; 4xx will fail identically
+# every time, so retrying one only burns the window.
+_RETRYABLE_HTTP_STATUS = {408, 429, 500, 502, 503, 504}
+_RETRYABLE_NETWORK_ERRORS = (
+    httplib2.error.ServerNotFoundError,
+    socket.gaierror,
+    socket.timeout,
+    TimeoutError,
+    ConnectionError,
+)
+
+
+def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, _RETRYABLE_NETWORK_ERRORS):
+        return True
+    if isinstance(exc, HttpError):
+        status = getattr(getattr(exc, "resp", None), "status", None)
+        return status in _RETRYABLE_HTTP_STATUS
+    return False
 
 
 def _build_service(creds: Credentials) -> Any:
@@ -164,18 +194,31 @@ class GmailClient:
 
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
-        try:
-            sent = (
-                self._service.users()
-                .messages()
-                .send(userId="me", body={"raw": raw})
-                .execute()
-            )
-            logger.info("Sent email to %s, messageId=%s", to, sent.get("id"))
-            return {"success": True, "message_id": sent.get("id"), "thread_id": sent.get("threadId")}
-        except HttpError as exc:
-            logger.error("Failed to send email: %s", exc)
-            raise
+        last_exc: Exception | None = None
+        for attempt in range(1, SEND_MAX_ATTEMPTS + 1):
+            try:
+                sent = (
+                    self._service.users()
+                    .messages()
+                    .send(userId="me", body={"raw": raw})
+                    .execute()
+                )
+                if attempt > 1:
+                    logger.info("Send succeeded on attempt %s/%s", attempt, SEND_MAX_ATTEMPTS)
+                logger.info("Sent email to %s, messageId=%s", to, sent.get("id"))
+                return {"success": True, "message_id": sent.get("id"), "thread_id": sent.get("threadId")}
+            except Exception as exc:
+                last_exc = exc
+                if not _is_retryable(exc) or attempt == SEND_MAX_ATTEMPTS:
+                    logger.error("Failed to send email: %s", exc)
+                    raise
+                delay = SEND_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
+                logger.warning(
+                    "Transient send failure (attempt %s/%s), retrying in %.1fs: %s",
+                    attempt, SEND_MAX_ATTEMPTS, delay, exc,
+                )
+                time.sleep(delay)
+        raise last_exc  # pragma: no cover - loop always returns or raises
 
     # ── List / Search ─────────────────────────────────────────────────────
 
