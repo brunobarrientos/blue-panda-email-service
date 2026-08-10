@@ -27,3 +27,12 @@ where = ["src"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.pytest.ini_options]
+# Without this, running pytest from a git worktree imports gmail_service from
+# whichever checkout the venv was installed against -- the MAIN one -- so the
+# suite silently tests code you are not editing and reports green. That happened
+# while fixing the 2026-08-10 thread-safety bug: a patched worktree kept failing
+# because pytest was reading main's source the whole time.
+pythonpath = ["src"]
+testpaths = ["tests"]

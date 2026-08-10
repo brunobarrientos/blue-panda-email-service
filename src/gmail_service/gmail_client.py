@@ -14,6 +14,8 @@ import os
 from typing import Any
 
 import socket
+import ssl
+import threading
 import time
 
 import httplib2
@@ -37,10 +39,18 @@ _RETRYABLE_NETWORK_ERRORS = (
     socket.timeout,
     TimeoutError,
     ConnectionError,
+    # A corrupted TLS record stream is transient: the next attempt gets a fresh
+    # socket. ssl.SSLError subclasses OSError rather than ConnectionError, so it
+    # used to fall straight through this tuple and lose the send as a 502.
+    ssl.SSLError,
 )
+# ...but a certificate that does not verify will not verify on retry either.
+_NON_RETRYABLE_SSL_ERRORS = (ssl.SSLCertVerificationError,)
 
 
 def _is_retryable(exc: Exception) -> bool:
+    if isinstance(exc, _NON_RETRYABLE_SSL_ERRORS):
+        return False
     if isinstance(exc, _RETRYABLE_NETWORK_ERRORS):
         return True
     if isinstance(exc, HttpError):
@@ -122,8 +132,57 @@ def _normalize_message(msg: dict) -> dict:
 
 
 class GmailClient:
+    """Gmail API wrapper with a per-thread transport.
+
+    The googleapiclient service object -- and the ``httplib2.Http`` and TLS
+    socket beneath it -- is NOT thread-safe. Every endpoint in ``server.py`` is a
+    sync ``def``, so FastAPI runs them concurrently in anyio's threadpool. One
+    shared service therefore meant one shared TLS socket, and concurrent calls
+    interleaved on the same record stream:
+
+        ssl.SSLError: [SSL] record layer failure (_ssl.c:2660)
+
+    Because that corruption lives in OpenSSL's C state it did not stop at an
+    exception -- star logged ``Failed with result 'core-dump'`` 2-4 times a day
+    from 2026-08-05. Sending a PDF was the worst case: a base64 attachment holds
+    the socket far longer than a one-line body, so a ``/health`` or ``/profile``
+    poller had a wide window to corrupt the stream mid-upload, and star was
+    taking ~161 polls per 5 minutes across four hosts.
+
+    Each thread builds and caches its own service, so no socket is ever shared.
+    """
+
     def __init__(self, creds: Credentials):
-        self._service = _build_service(creds)
+        self._creds = creds
+        self._local = threading.local()
+
+    def _thread_state(self) -> threading.local:
+        # Tolerates instances built via __new__ (the test suite injects a fake
+        # service that way) as well as normal construction.
+        local = self.__dict__.get("_local")
+        if local is None:
+            local = threading.local()
+            self.__dict__["_local"] = local
+        return local
+
+    @property
+    def _service(self) -> Any:
+        local = self._thread_state()
+        service = getattr(local, "service", None)
+        if service is None:
+            service = _build_service(self._creds)
+            local.service = service
+        return service
+
+    @_service.setter
+    def _service(self, value: Any) -> None:
+        """Injection seam for tests -- per-thread, exactly like the getter.
+
+        Kept deliberately: the retry tests inject a fake service by assignment,
+        and that seam is sound. Removing it to land the thread-local change would
+        have meant rewriting seven passing tests to suit the implementation.
+        """
+        self._thread_state().service = value
 
     # ── Profile ───────────────────────────────────────────────────────────
 
