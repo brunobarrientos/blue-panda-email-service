@@ -12,9 +12,17 @@ test "$(git branch --show-current)" = main
 git fetch origin main
 test "$(git rev-parse origin/main)" = "$expected_sha"
 git merge-base --is-ancestor HEAD "$expected_sha"
+git diff --exit-code HEAD "$expected_sha" -- pyproject.toml
 git merge --ff-only origin/main
 test "$(git rev-parse HEAD)" = "$expected_sha"
-.venv/bin/python -m pip install --no-deps -e .
+# This service is already editable; pure Python updates need no reinstall.
+# Fail on metadata changes above rather than rebuilding an unrelated runtime.
+.venv/bin/python - <<'PY'
+from pathlib import Path
+import fastapi, googleapiclient, uvicorn
+import gmail_service, gmail_service.server, gmail_service.monitoring
+assert Path(gmail_service.__file__).resolve() == Path.cwd() / 'src/gmail_service/__init__.py'
+PY
 sudo -n install -d -m 755 /etc/systemd/system/gmail-service.service.d
 sudo -n install -m 644 launchd/monitoring-digest.conf /etc/systemd/system/gmail-service.service.d/monitoring-digest.conf
 sudo -n systemctl daemon-reload
