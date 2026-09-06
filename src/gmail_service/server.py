@@ -8,13 +8,14 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from google.auth.exceptions import RefreshError
 from pydantic import BaseModel, Field
 
 from gmail_service.auth import auth_status, get_authorized_credentials
 from gmail_service.config import Settings
 from gmail_service.gmail_client import GmailClient
+from gmail_service.monitoring import MonitoringStore, RECIPIENT, SENDER, matches
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,12 @@ class SendResponse(BaseModel):
     success: bool
     message_id: str | None = None
     thread_id: str | None = None
+    delivery_status: str = 'sent'
+    queue_id: int | None = None
+
+
+class DigestRequest(BaseModel):
+    body: str = Field(..., max_length=64000)
 
 
 class MessageRef(BaseModel):
@@ -100,6 +107,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     health_cache = {"checked_at": 0.0, "result": None}
 
     send_state: dict = {"consecutive": 0, "last_failure": None}
+    monitoring = MonitoringStore(settings.token_path.parent / 'monitoring.sqlite3') if settings.monitoring_enabled else None
 
     def require_gmail_client() -> GmailClient:
         if time.monotonic() < circuit["broken_until"]:
@@ -175,6 +183,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "status": "ok",
             "gmail_auth": health_cache["result"],
             "last_send_failure": send_state["last_failure"],
+            "monitoring": monitoring.status() if monitoring else {'enabled': False},
             "service": "gmail-service",
             "version": "0.1.0",
         }
@@ -195,6 +204,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.post("/send", response_model=SendResponse)
     def send_email(req: SendRequest) -> dict:
+        if monitoring and matches(req.to, req.cc, req.bcc, req.subject):
+            if req.to.strip().lower() != RECIPIENT or req.cc or req.bcc or req.attachments or req.html:
+                raise HTTPException(422, 'Monitoring notices must be plain text to Bruno only, without attachments')
+            try:
+                return monitoring.enqueue(req.subject, req.body)
+            except ValueError as exc:
+                raise HTTPException(422, str(exc)) from exc
         client = require_gmail_client()
         try:
             result = client.send_email(
@@ -213,6 +229,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             record_gmail_error(exc)
             record_send_failure(exc)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    def local_monitoring(request):
+        if not monitoring:
+            raise HTTPException(404, 'Monitoring digest disabled')
+        if not request.client or request.client.host not in ('127.0.0.1', '::1'):
+            raise HTTPException(403, 'Local monitoring controller only')
+
+    @app.get('/monitoring/status')
+    def monitoring_status():
+        return monitoring.status() if monitoring else {'enabled': False}
+
+    @app.get('/monitoring/events')
+    def monitoring_events(request: Request):
+        local_monitoring(request)
+        return {'events': monitoring.events()}
+
+    @app.post('/monitoring/digest')
+    def monitoring_digest(req: DigestRequest, request: Request):
+        local_monitoring(request)
+        client = require_gmail_client()
+        # Preflight before consuming the daily budget; no send has begun yet.
+        try:
+            if client.get_profile().get('email_address') != SENDER:
+                raise HTTPException(503, 'Panda sender identity mismatch')
+        except HTTPException:
+            raise
+        except Exception as exc:
+            record_gmail_error(exc)
+            raise HTTPException(503, 'Panda sender preflight failed') from exc
+        acquired, reservation = monitoring.reserve(req.body)
+        if not acquired:
+            if reservation['status'] == 'sent':
+                return {'success': True, 'delivery_status': 'already_sent', 'message_id': reservation['message_id']}
+            raise HTTPException(409, 'Daily send already reserved or uncertain; reconcile Gmail before any recovery')
+        try:
+            result = client.send_email(to=RECIPIENT,
+                subject=f'[Universe Alert] Daily review — {reservation["day"]}',
+                body=reservation['body'], max_attempts=1)
+            if not result.get('success') or not result.get('message_id'):
+                raise RuntimeError('Gmail did not confirm a message ID')
+            monitoring.finish(reservation, result=result)
+            record_send_success()
+            return {**result, 'delivery_status': 'sent'}
+        except Exception as exc:
+            monitoring.finish(reservation, error=str(exc))
+            record_gmail_error(exc)
+            record_send_failure(exc)
+            raise HTTPException(502, 'Daily delivery uncertain; automatic resend blocked') from exc
 
     # ── Inbox ───────────────────────────────────────────────────────────
 

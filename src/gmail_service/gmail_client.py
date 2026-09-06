@@ -206,6 +206,7 @@ class GmailClient:
         cc: str = "",
         bcc: str = "",
         attachments: list[dict[str, Any]] | None = None,
+        max_attempts: int | None = None,
     ) -> dict:
         """Send an email and return the sent message metadata.
 
@@ -254,7 +255,10 @@ class GmailClient:
         raw = base64.urlsafe_b64encode(msg.as_bytes()).decode("utf-8")
 
         last_exc: Exception | None = None
-        for attempt in range(1, SEND_MAX_ATTEMPTS + 1):
+        attempts = SEND_MAX_ATTEMPTS if max_attempts is None else max_attempts
+        if attempts < 1:
+            raise ValueError('max_attempts must be positive')
+        for attempt in range(1, attempts + 1):
             try:
                 sent = (
                     self._service.users()
@@ -268,7 +272,7 @@ class GmailClient:
                 return {"success": True, "message_id": sent.get("id"), "thread_id": sent.get("threadId")}
             except Exception as exc:
                 last_exc = exc
-                if not _is_retryable(exc) or attempt == SEND_MAX_ATTEMPTS:
+                if not _is_retryable(exc) or attempt == attempts:
                     logger.error("Failed to send email: %s", exc)
                     raise
                 delay = SEND_BACKOFF_BASE_SEC * (2 ** (attempt - 1))
