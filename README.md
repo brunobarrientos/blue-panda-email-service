@@ -5,7 +5,7 @@
 Standalone FastAPI service that sends email on behalf of `focusedbluepanda@gmail.com`.
 
 Repo: https://github.com/brunobarrientos/blue-panda-email-service  
-Runtime path on Star: `/home/star/AI/blue-panda-email-service`  
+Runtime path on Star: `/home/star/AI/blue-panda-email-service`
 Internal Python package: `gmail_service` (kept for import compatibility).
 
 ## Canonical project
