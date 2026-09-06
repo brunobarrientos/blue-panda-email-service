@@ -29,6 +29,7 @@ class Settings:
     host: str = "0.0.0.0"
     port: int = 9770
     log_level: str = "info"
+    monitoring_enabled: bool = False
 
     # Gmail OAuth
     credentials_path: Path = field(
@@ -48,6 +49,7 @@ class Settings:
             host=_env("GMAIL_SERVICE_HOST", "0.0.0.0"),
             port=_int_env("GMAIL_SERVICE_PORT", 9770),
             log_level=_env("GMAIL_SERVICE_LOG_LEVEL", "info"),
+            monitoring_enabled=_env("GMAIL_MONITORING_DIGEST_ENABLED", "false").lower() == "true",
             credentials_path=Path(_env("GMAIL_CREDENTIALS_PATH", str(Path.home() / ".gmail-service" / "credentials.json"))),
             token_path=Path(_env("GMAIL_TOKEN_PATH", str(Path.home() / ".gmail-service" / "token.json"))),
         )
