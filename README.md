@@ -12,7 +12,7 @@ Internal Python package: `gmail_service` (kept for import compatibility).
 
 Star is the current runtime host. Historical Hetzner setup examples below are
 not a deployment target. Existing Star credentials are preserved; the current
-deployment command is `bash scripts/deploy.sh`, which promotes reviewed
+deployment command is `bash scripts/deploy.sh REVIEWED_MERGED_SHA`, which promotes reviewed
 `origin/main` only from a clean `main` checkout and installs the monitoring
 policy drop-in. It does not rsync, delete remote files, or copy credentials.
 
