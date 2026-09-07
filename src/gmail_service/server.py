@@ -53,6 +53,7 @@ class SendResponse(BaseModel):
 
 class DigestRequest(BaseModel):
     body: str = Field(..., max_length=64000)
+    quiet: bool = False
 
 
 class MessageRef(BaseModel):
@@ -258,8 +259,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except Exception as exc:
             record_gmail_error(exc)
             raise HTTPException(503, 'Panda sender preflight failed') from exc
-        acquired, reservation = monitoring.reserve(req.body)
+        if req.quiet and req.body.strip():
+            raise HTTPException(422, 'A quiet assessment must have an empty body')
+        if not req.quiet and not req.body.strip():
+            raise HTTPException(422, 'An actionable digest requires a nonempty current summary')
+        acquired, reservation = monitoring.reserve(req.body, quiet=req.quiet)
         if not acquired:
+            if reservation['status'] == 'quiet':
+                return {'success': True, 'delivery_status': 'quiet', 'day': reservation['day']}
             if reservation['status'] == 'sent':
                 return {'success': True, 'delivery_status': 'already_sent', 'message_id': reservation['message_id']}
             raise HTTPException(409, 'Daily send already reserved or uncertain; reconcile Gmail before any recovery')

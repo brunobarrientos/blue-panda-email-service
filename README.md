@@ -1,6 +1,6 @@
 # blue-panda-email-service
 
-> Last revised: 2026-09-06
+> Last revised: 2026-09-07
 
 Standalone FastAPI service that sends email on behalf of `focusedbluepanda@gmail.com`.
 
@@ -16,9 +16,11 @@ deployment command is `bash scripts/deploy.sh REVIEWED_MERGED_SHA`, which promot
 `origin/main` only from a clean `main` checkout and installs the monitoring
 policy drop-in. It does not rsync, delete remote files, or copy credentials.
 
-## One daily monitoring email
+## At most one actionable monitoring email per day
 
-Bruno authorized this policy on 2026-09-06. With
+Bruno authorized consolidation on 2026-09-06 and quiet-day suppression on
+2026-09-07. Send only current unresolved or actionable findings; when none
+remain, record a quiet assessment and send no email. With
 `GMAIL_MONITORING_DIGEST_ENABLED=true`, `/send` durably queues messages to Bruno
 whose subjects start with `[Universe Alert`, `[last-mile]`, `[CHAT ARCHIVE ` or
 `[bridge-probe]` (case insensitive). These cover the inventoried Moon, Star,
@@ -27,19 +29,47 @@ keeps its send behavior. New monitoring producers must use one of these
 prefixes; free-form subjects cannot be reliably classified as monitoring.
 
 Queue acknowledgment is `success=true, delivery_status=queued, queue_id=N`,
-with no Gmail message ID. This means accepted for the daily digest, not sent.
+with no Gmail message ID. This means accepted as monitoring evidence, not sent
+or promised a place in the email.
 Producers must treat that state separately in delivery metrics. Input must be
 plain text to the exact Bruno address, without cc, bcc or attachments. Unsupported
 payloads receive 422, never silent truncation.
 
 The persistent SQLite ledger is beside `GMAIL_TOKEN_PATH`, at
 `~/.gmail-service/monitoring.sqlite3`. `/monitoring/status` exposes queue counts
-and the latest daily delivery state. Localhost-only `/monitoring/events` supplies
-pending evidence to the response controller. Localhost-only
-`POST /monitoring/digest` accepts `{"body":"review and action summary"}` and sends
-the single daily review from `focusedbluepanda@gmail.com` to
-`brunobarrientosf@gmail.com`. The Universe controller owns scheduling, incident
-tracking and AI review. The mail service owns the final per-day budget.
+and the latest daily delivery state. Its `last_assessment` is either null or
+`{"day":"YYYY-MM-DD","status":"quiet|reserved|sent|uncertain","updated_at":"UTC timestamp"}`.
+Callers must check its Paris date as well as its status. Quiet is a completed
+assessment with no delivery; it does not claim that Gmail sent a message.
+Localhost-only `/monitoring/events` supplies pending historical evidence to the
+response controller; queue counts do not establish current actionability.
+
+Localhost-only `POST /monitoring/digest` supports two requests:
+
+- `{"body":"Current unresolved findings and required actions"}` sends exactly
+  that summary from `focusedbluepanda@gmail.com` to `brunobarrientosf@gmail.com`,
+  subject to the daily budget. Raw queued subjects, bodies, resolved events,
+  canaries, and obsolete notices are never appended by the mail service.
+- `{"body":"","quiet":true}` records the assessment and returns
+  `{"success":true,"delivery_status":"quiet","day":"YYYY-MM-DD"}`. It calls no
+  Gmail send operation and creates no delivery reservation. A later actionable
+  finding can still use the day's one send allowance. Quiet requires an empty
+  body; a sending request requires a nonempty current summary.
+
+Both requests preserve sender-profile preflight. An existing reserved or
+uncertain delivery returns 409 even for a quiet request. An existing confirmed
+send returns `already_sent` with its Gmail message ID; quiet cannot hide or
+replace that outcome. The persistent `daily_assessments` table tracks the latest
+quiet or send state for each Paris date, including reservation and uncertainty.
+Full queue records remain in SQLite and stay visible through `/monitoring/events`
+after either quiet assessment or summary delivery. Occurrence-version snapshots
+record only that those notices were `available`; they do not claim individual
+review, resolution, or delivery. A confirmed send proves only the supplied body
+in `deliveries` was sent. The legacy `delivered_on` column is retained but no new
+summary operation sets it or deletes queued evidence.
+
+The Universe controller owns scheduling, current-incident assessment and AI
+review. The mail service owns quiet recording and the final per-day send budget.
 
 Reservations are atomic across requests/processes and survive restarts. A
 confirmed send records the Gmail message ID. The daily send disables transport
